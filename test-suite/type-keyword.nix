@@ -1,5 +1,4 @@
 {
-  name = "type keyword";
   description = ''
     Tests for schemas consisting only of the `type` keyword.
 
@@ -22,6 +21,7 @@
     # Property: a `type` schema A is a subtype of a `type` schema B iff the
     # set of types allowed by A is a subset of the set of types allowed by B.
     {
+      name = "subset of types is a subtype";
       cases = [
         {
           sup = [
@@ -32,6 +32,7 @@
             {type = "null";}
             {type = ["boolean" "object"];}
           ];
+          result = true;
         }
       ];
     }
