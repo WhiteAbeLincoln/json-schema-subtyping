@@ -1,14 +1,26 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+use snafu::Snafu;
+pub mod output;
+pub mod schema;
+pub use schema::{FilePosition, JsonPointer, JsonSchema};
+
+use crate::output::{DetailedOutput, Location};
+
+pub enum SubtypeRelation {
+    Subtype,
+    // TODO: allow choosing between basic and detailed output
+    NotSubtype(DetailedOutput),
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+#[derive(Debug, Snafu)]
+pub enum SubtypeError {
+    // TODO: include location information
+    UnsupportedKeyword { keyword: String, location: Location },
+}
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+/// Checks if `a` is a subtype of `b` according to the JSON Schema specification.
+pub fn is_subtype<A: JsonSchema, B: JsonSchema>(
+    sup: &A,
+    sub: &B,
+) -> Result<SubtypeRelation, SubtypeError> {
+    todo!()
 }

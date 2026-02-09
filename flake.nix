@@ -11,21 +11,19 @@
     flake-utils.url = "github:numtide/flake-utils";
   };
 
-  outputs =
-    {
-      self,
-      nixpkgs,
-      crane,
-      rust-overlay,
-      flake-utils,
-      ...
-    }:
+  outputs = {
+    self,
+    nixpkgs,
+    crane,
+    rust-overlay,
+    flake-utils,
+    ...
+  }:
     flake-utils.lib.eachDefaultSystem (
-      system:
-      let
+      system: let
         pkgs = import nixpkgs {
           inherit system;
-          overlays = [ (import rust-overlay) ];
+          overlays = [(import rust-overlay)];
         };
 
         rustToolchainFor = p: p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
@@ -39,22 +37,28 @@
 
         cargoArtifacts = craneLib.buildDepsOnly commonArgs;
 
-        crate = craneLib.buildPackage (commonArgs // {
-          inherit cargoArtifacts;
-        });
-      in
-      {
+        crate = craneLib.buildPackage (commonArgs
+          // {
+            inherit cargoArtifacts;
+          });
+      in {
         checks = {
           inherit crate;
 
-          clippy = craneLib.cargoClippy (commonArgs // {
-            inherit cargoArtifacts;
-            cargoClippyExtraArgs = "--all-targets -- --deny warnings";
-          });
+          clippy = craneLib.cargoClippy (commonArgs
+            // {
+              inherit cargoArtifacts;
+              cargoClippyExtraArgs = "--all-targets -- --deny warnings";
+            });
 
           fmt = craneLib.cargoFmt {
             inherit src;
           };
+
+          tests = craneLib.cargoNextest (commonArgs
+            // {
+              inherit cargoArtifacts;
+            });
         };
 
         packages.default = crate;
