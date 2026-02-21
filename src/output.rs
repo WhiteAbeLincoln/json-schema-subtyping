@@ -1,4 +1,7 @@
-use crate::{FilePosition, JsonPointer};
+use std::ops::Range;
+
+pub type JsonPointer = String;
+pub type FilePosition = Range<usize>;
 
 #[derive(Debug)]
 pub struct Location {

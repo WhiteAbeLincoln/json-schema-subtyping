@@ -650,6 +650,7 @@ dependencies = [
 name = "json-schema-subtyping"
 version = "0.1.0"
 dependencies = [
+ "bitflags",
  "jsonc-parser",
  "jsonschema",
  "libtest-mimic",

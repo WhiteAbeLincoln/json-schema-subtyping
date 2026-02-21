@@ -4,7 +4,7 @@ use std::process::Command;
 use libtest_mimic::{Arguments, Failed, Trial};
 use serde::Deserialize;
 
-use json_schema_subtyping::{is_subtype, JsonSchema, SubtypeRelation};
+use json_schema_subtyping::{SubtypeRelation, is_subtype};
 
 // ---------------------------------------------------------------------------
 // Data types — mirrors the structure defined in .test-config.json
@@ -68,37 +68,17 @@ impl TestResult {
 }
 
 // ---------------------------------------------------------------------------
-// Newtype wrapper to implement JsonSchema for serde_json::Value
-// ---------------------------------------------------------------------------
-
-struct ValueSchema(serde_json::Value);
-
-impl JsonSchema for ValueSchema {}
-
-// ---------------------------------------------------------------------------
 // JSON Schema validation
 // ---------------------------------------------------------------------------
 
 fn load_schema_validator(test_suite_dir: &Path) -> jsonschema::Validator {
     let schema_path = test_suite_dir.join(".test-config.json");
-    let schema_str = std::fs::read_to_string(&schema_path).unwrap_or_else(|e| {
-        panic!(
-            "Failed to read schema {}: {e}",
-            schema_path.display()
-        )
-    });
-    let schema: serde_json::Value = serde_json::from_str(&schema_str).unwrap_or_else(|e| {
-        panic!(
-            "Failed to parse schema {}: {e}",
-            schema_path.display()
-        )
-    });
-    jsonschema::draft202012::new(&schema).unwrap_or_else(|e| {
-        panic!(
-            "Failed to compile schema {}: {e}",
-            schema_path.display()
-        )
-    })
+    let schema_str = std::fs::read_to_string(&schema_path)
+        .unwrap_or_else(|e| panic!("Failed to read schema {}: {e}", schema_path.display()));
+    let schema: serde_json::Value = serde_json::from_str(&schema_str)
+        .unwrap_or_else(|e| panic!("Failed to parse schema {}: {e}", schema_path.display()));
+    jsonschema::draft202012::new(&schema)
+        .unwrap_or_else(|e| panic!("Failed to compile schema {}: {e}", schema_path.display()))
 }
 
 fn validate_against_schema(
@@ -154,15 +134,13 @@ fn write_cache(path: &Path, json_str: &str) {
             panic!("Failed to create cache directory {}: {e}", parent.display())
         });
     }
-    std::fs::write(path, json_str).unwrap_or_else(|e| {
-        panic!("Failed to write cache file {}: {e}", path.display())
-    });
+    std::fs::write(path, json_str)
+        .unwrap_or_else(|e| panic!("Failed to write cache file {}: {e}", path.display()));
 }
 
 fn read_cache(path: &Path) -> String {
-    std::fs::read_to_string(path).unwrap_or_else(|e| {
-        panic!("Failed to read cache file {}: {e}", path.display())
-    })
+    std::fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("Failed to read cache file {}: {e}", path.display()))
 }
 
 // ---------------------------------------------------------------------------
@@ -190,10 +168,7 @@ fn nix_eval_to_json(nix_path: &Path) -> String {
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        panic!(
-            "nix eval failed for {}:\n{stderr}",
-            nix_path.display()
-        );
+        panic!("nix eval failed for {}:\n{stderr}", nix_path.display());
     }
 
     String::from_utf8(output.stdout)
@@ -271,13 +246,10 @@ fn expand_trials(test_suite_dir: &Path) -> Vec<Trial> {
         };
 
         let config: TestConfig = serde_json::from_str(&json_str).unwrap_or_else(|e| {
-            panic!(
-                "Failed to deserialize {}: {e}",
-                nix_file.display()
-            );
+            panic!("Failed to deserialize {}: {e}", nix_file.display());
         });
 
-        for (_suite_idx, suite) in config.tests.iter().enumerate() {
+        for suite in &config.tests {
             let suite_name = &suite.name;
 
             for (case_idx, case) in suite.cases.iter().enumerate() {
@@ -295,9 +267,7 @@ fn expand_trials(test_suite_dir: &Path) -> Vec<Trial> {
                 for (si, sup_val) in sups.iter().enumerate() {
                     for (sj, sub_val) in subs.iter().enumerate() {
                         let test_name = if needs_index {
-                            format!(
-                                "{file_stem}::{suite_name}::{case_name}[sup={si},sub={sj}]"
-                            )
+                            format!("{file_stem}::{suite_name}::{case_name}[sup={si},sub={sj}]")
                         } else {
                             format!("{file_stem}::{suite_name}::{case_name}")
                         };
@@ -327,34 +297,28 @@ fn run_subtype_test(
     sub: &serde_json::Value,
     expected_subtype: bool,
 ) -> Result<(), Failed> {
-    let sup_schema = ValueSchema(sup.clone());
-    let sub_schema = ValueSchema(sub.clone());
-
-    match is_subtype(&sup_schema, &sub_schema) {
+    match is_subtype(sup, sub) {
         Ok(SubtypeRelation::Subtype) => {
             if expected_subtype {
                 Ok(())
             } else {
-                Err(format!(
-                    "Expected NOT subtype, but got Subtype\n  sup: {sup}\n  sub: {sub}"
+                Err(
+                    format!("Expected NOT subtype, but got Subtype\n  sup: {sup}\n  sub: {sub}")
+                        .into(),
                 )
-                .into())
             }
         }
         Ok(SubtypeRelation::NotSubtype(_)) => {
             if expected_subtype {
-                Err(format!(
-                    "Expected Subtype, but got NotSubtype\n  sup: {sup}\n  sub: {sub}"
+                Err(
+                    format!("Expected Subtype, but got NotSubtype\n  sup: {sup}\n  sub: {sub}")
+                        .into(),
                 )
-                .into())
             } else {
                 Ok(())
             }
         }
-        Err(e) => Err(format!(
-            "is_subtype returned error: {e}\n  sup: {sup}\n  sub: {sub}"
-        )
-        .into()),
+        Err(e) => Err(format!("is_subtype returned error: {e}\n  sup: {sup}\n  sub: {sub}").into()),
     }
 }
 
