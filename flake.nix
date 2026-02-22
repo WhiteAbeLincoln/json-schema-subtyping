@@ -26,7 +26,9 @@
           overlays = [(import rust-overlay)];
         };
 
-        rustToolchainFor = p: p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
+        rustToolchainFor = p: (p.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml).override {
+          extensions = ["rust-src"];
+        };
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchainFor;
         src = craneLib.cleanCargoSource ./.;
 

@@ -2,7 +2,9 @@ use std::fmt;
 
 use serde_json::Value;
 
-use crate::schema::{JsonSchema, JsonValue, SchemaF, SchemaObject, TypeSet};
+use crate::schema::keyword::{Get, QuerySchema, SchemaKind};
+use crate::schema::keywords::*;
+use crate::schema::{JsonValue, TypeSet};
 
 /// Error returned when a `serde_json::Value` is not a valid JSON Schema.
 #[derive(Debug)]
@@ -36,14 +38,46 @@ impl fmt::Display for ViewError {
 
 impl std::error::Error for ViewError {}
 
-impl JsonSchema for Value {
-    type ViewError = ViewError;
+// ---------------------------------------------------------------------------
+// QuerySchema for serde_json::Value
+// ---------------------------------------------------------------------------
 
-    fn try_view(&self) -> Result<SchemaF<&str, &Self>, ViewError> {
+impl QuerySchema for Value {
+    type Error = ViewError;
+
+    fn kind(&self) -> Result<SchemaKind, ViewError> {
         match self {
-            Value::Bool(true) => Ok(SchemaF::True),
-            Value::Bool(false) => Ok(SchemaF::False),
-            Value::Object(map) => Ok(SchemaF::Schema(Box::new(parse_schema_object(map)?))),
+            Value::Bool(true) => Ok(SchemaKind::Top),
+            Value::Bool(false) => Ok(SchemaKind::Bottom),
+            Value::Object(map) => {
+                // Empty object = top (no constraints)
+                if map.is_empty() {
+                    return Ok(SchemaKind::Top);
+                }
+
+                // Check if effectively top (only unconstrained keywords)
+                if is_effectively_top(map) {
+                    return Ok(SchemaKind::Top);
+                }
+
+                // {not: X} where X is top → bottom, X is bottom → top
+                if let Some(not_val) = map.get("not")
+                    && map.len() == 1
+                {
+                    match not_val.kind()? {
+                        SchemaKind::Top => return Ok(SchemaKind::Bottom),
+                        SchemaKind::Bottom => return Ok(SchemaKind::Top),
+                        SchemaKind::Constrained => {}
+                    }
+                }
+
+                // Unsatisfiable min/max pairs → bottom
+                if is_unsatisfiable(map) {
+                    return Ok(SchemaKind::Bottom);
+                }
+
+                Ok(SchemaKind::Constrained)
+            }
             Value::Null => Err(ViewError::InvalidSchema { found: "null" }),
             Value::Number(_) => Err(ViewError::InvalidSchema { found: "number" }),
             Value::String(_) => Err(ViewError::InvalidSchema { found: "string" }),
@@ -52,242 +86,46 @@ impl JsonSchema for Value {
     }
 }
 
-fn parse_schema_object(
-    map: &serde_json::Map<String, Value>,
-) -> Result<SchemaObject<&str, &Value>, ViewError> {
-    let mut obj = SchemaObject::default();
-
-    // ---- type ----
-    if let Some(ty) = map.get("type") {
-        obj.r#type = parse_type_set(ty)?;
-    }
-
-    // ---- numeric ----
-    if let Some(v) = map.get("multipleOf") {
-        obj.multiple_of = Some(v.as_f64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "multipleOf",
-            expected: "a number",
-        })?);
-    }
-    if let Some(v) = map.get("maximum") {
-        obj.maximum = Some(v.as_f64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "maximum",
-            expected: "a number",
-        })?);
-    }
-    if let Some(v) = map.get("exclusiveMaximum") {
-        obj.exclusive_maximum = Some(v.as_f64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "exclusiveMaximum",
-            expected: "a number",
-        })?);
-    }
-    if let Some(v) = map.get("minimum") {
-        obj.minimum = Some(v.as_f64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "minimum",
-            expected: "a number",
-        })?);
-    }
-    if let Some(v) = map.get("exclusiveMinimum") {
-        obj.exclusive_minimum = Some(v.as_f64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "exclusiveMinimum",
-            expected: "a number",
-        })?);
-    }
-
-    // ---- string ----
-    if let Some(v) = map.get("minLength") {
-        obj.min_length = v.as_u64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "minLength",
-            expected: "a non-negative integer",
-        })?;
-    }
-    if let Some(v) = map.get("maxLength") {
-        obj.max_length = Some(v.as_u64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "maxLength",
-            expected: "a non-negative integer",
-        })?);
-    }
-    if let Some(v) = map.get("pattern") {
-        obj.pattern = Some(v.as_str().ok_or(ViewError::InvalidKeywordType {
-            keyword: "pattern",
-            expected: "a string",
-        })?);
-    }
-
-    // ---- array ----
-    if let Some(v) = map.get("minItems") {
-        obj.min_items = v.as_u64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "minItems",
-            expected: "a non-negative integer",
-        })?;
-    }
-    if let Some(v) = map.get("maxItems") {
-        obj.max_items = Some(v.as_u64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "maxItems",
-            expected: "a non-negative integer",
-        })?);
-    }
-    if let Some(v) = map.get("uniqueItems") {
-        obj.unique_items = v.as_bool().ok_or(ViewError::InvalidKeywordType {
-            keyword: "uniqueItems",
-            expected: "a boolean",
-        })?;
-    }
-    if let Some(v) = map.get("minContains") {
-        obj.min_contains = Some(v.as_u64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "minContains",
-            expected: "a non-negative integer",
-        })?);
-    }
-    if let Some(v) = map.get("maxContains") {
-        obj.max_contains = Some(v.as_u64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "maxContains",
-            expected: "a non-negative integer",
-        })?);
-    }
-
-    // ---- object ----
-    if let Some(v) = map.get("minProperties") {
-        obj.min_properties = v.as_u64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "minProperties",
-            expected: "a non-negative integer",
-        })?;
-    }
-    if let Some(v) = map.get("maxProperties") {
-        obj.max_properties = Some(v.as_u64().ok_or(ViewError::InvalidKeywordType {
-            keyword: "maxProperties",
-            expected: "a non-negative integer",
-        })?);
-    }
-    if let Some(v) = map.get("required") {
-        let arr = v.as_array().ok_or(ViewError::InvalidKeywordType {
-            keyword: "required",
-            expected: "an array of strings",
-        })?;
-        obj.required = arr.iter().filter_map(|v| v.as_str()).collect();
-    }
-
-    // ---- const / enum ----
-    if let Some(v) = map.get("const") {
-        obj.r#const = Some(JsonValue::from(v));
-    }
-    if let Some(v) = map.get("enum") {
-        let arr = v.as_array().ok_or(ViewError::InvalidKeywordType {
-            keyword: "enum",
-            expected: "an array",
-        })?;
-        obj.r#enum = Some(arr.iter().map(JsonValue::from).collect());
-    }
-
-    // ---- applicator: array ----
-    if let Some(v) = map.get("prefixItems") {
-        let arr = v.as_array().ok_or(ViewError::InvalidKeywordType {
-            keyword: "prefixItems",
-            expected: "an array of schemas",
-        })?;
-        obj.prefix_items = arr.iter().collect();
-    }
-    if let Some(v) = map.get("items") {
-        obj.items = Some(v);
-    }
-    if let Some(v) = map.get("contains") {
-        obj.contains = Some(v);
-    }
-
-    // ---- applicator: object ----
-    if let Some(v) = map.get("properties") {
-        let props = v.as_object().ok_or(ViewError::InvalidKeywordType {
-            keyword: "properties",
-            expected: "an object",
-        })?;
-        obj.properties = props.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    }
-    if let Some(v) = map.get("patternProperties") {
-        let props = v.as_object().ok_or(ViewError::InvalidKeywordType {
-            keyword: "patternProperties",
-            expected: "an object",
-        })?;
-        obj.pattern_properties = props.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    }
-    if let Some(v) = map.get("additionalProperties") {
-        obj.additional_properties = Some(v);
-    }
-    if let Some(v) = map.get("propertyNames") {
-        obj.property_names = Some(v);
-    }
-
-    // ---- applicator: conditional ----
-    if let Some(v) = map.get("if") {
-        obj.r#if = Some(v);
-    }
-    if let Some(v) = map.get("then") {
-        obj.then = Some(v);
-    }
-    if let Some(v) = map.get("else") {
-        obj.r#else = Some(v);
-    }
-
-    // ---- applicator: composition ----
-    if let Some(v) = map.get("allOf") {
-        let arr = v.as_array().ok_or(ViewError::InvalidKeywordType {
-            keyword: "allOf",
-            expected: "an array of schemas",
-        })?;
-        obj.all_of = arr.iter().collect();
-    }
-    if let Some(v) = map.get("anyOf") {
-        let arr = v.as_array().ok_or(ViewError::InvalidKeywordType {
-            keyword: "anyOf",
-            expected: "an array of schemas",
-        })?;
-        obj.any_of = arr.iter().collect();
-    }
-    if let Some(v) = map.get("oneOf") {
-        let arr = v.as_array().ok_or(ViewError::InvalidKeywordType {
-            keyword: "oneOf",
-            expected: "an array of schemas",
-        })?;
-        obj.one_of = arr.iter().collect();
-    }
-    if let Some(v) = map.get("not") {
-        obj.not = Some(v);
-    }
-
-    // ---- applicator: unevaluated ----
-    if let Some(v) = map.get("unevaluatedItems") {
-        obj.unevaluated_items = Some(v);
-    }
-    if let Some(v) = map.get("unevaluatedProperties") {
-        obj.unevaluated_properties = Some(v);
-    }
-
-    // ---- applicator: dependencies ----
-    if let Some(v) = map.get("dependentSchemas") {
-        let deps = v.as_object().ok_or(ViewError::InvalidKeywordType {
-            keyword: "dependentSchemas",
-            expected: "an object",
-        })?;
-        obj.dependent_schemas = deps.iter().map(|(k, v)| (k.as_str(), v)).collect();
-    }
-    if let Some(v) = map.get("dependentRequired") {
-        let deps = v.as_object().ok_or(ViewError::InvalidKeywordType {
-            keyword: "dependentRequired",
-            expected: "an object",
-        })?;
-        obj.dependent_required = deps
-            .iter()
-            .filter_map(|(k, v)| {
-                if let Value::Array(arr) = v {
-                    Some((k.as_str(), arr.iter().filter_map(|s| s.as_str()).collect()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-    }
-
-    Ok(obj)
+/// Check if a schema object is effectively top (all keywords at their
+/// unconstrained defaults). Currently checks for {type: [all types]}.
+fn is_effectively_top(map: &serde_json::Map<String, Value>) -> bool {
+    map.iter().all(|(key, val)| match key.as_str() {
+        "type" => parse_type_set(val).is_ok_and(|ts| ts == TypeSet::all()),
+        _ => false,
+    })
 }
+
+fn is_unsatisfiable(map: &serde_json::Map<String, Value>) -> bool {
+    exceeds_u64(map, "minLength", "maxLength")
+        || exceeds_u64(map, "minItems", "maxItems")
+        || exceeds_u64(map, "minProperties", "maxProperties")
+        || exceeds_u64(map, "minContains", "maxContains")
+        || exceeds_f64(map, "minimum", "maximum")
+}
+
+fn exceeds_u64(map: &serde_json::Map<String, Value>, min_key: &str, max_key: &str) -> bool {
+    let Some(min_val) = map.get(min_key).and_then(|v| v.as_u64()) else {
+        return false;
+    };
+    let Some(max_val) = map.get(max_key).and_then(|v| v.as_u64()) else {
+        return false;
+    };
+    min_val > max_val
+}
+
+fn exceeds_f64(map: &serde_json::Map<String, Value>, min_key: &str, max_key: &str) -> bool {
+    let Some(min_val) = map.get(min_key).and_then(|v| v.as_f64()) else {
+        return false;
+    };
+    let Some(max_val) = map.get(max_key).and_then(|v| v.as_f64()) else {
+        return false;
+    };
+    min_val > max_val
+}
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
 
 fn parse_type_name(name: &str) -> Result<TypeSet, ViewError> {
     TypeSet::from_type_name(name).ok_or_else(|| ViewError::UnknownTypeName {
@@ -316,341 +154,457 @@ fn parse_type_set(value: &Value) -> Result<TypeSet, ViewError> {
     }
 }
 
+fn get_opt_f64(
+    map: &serde_json::Map<String, Value>,
+    keyword: &'static str,
+) -> Result<Option<f64>, ViewError> {
+    match map.get(keyword) {
+        None => Ok(None),
+        Some(v) => Ok(Some(v.as_f64().ok_or(ViewError::InvalidKeywordType {
+            keyword,
+            expected: "a number",
+        })?)),
+    }
+}
+
+fn get_opt_u64(
+    map: &serde_json::Map<String, Value>,
+    keyword: &'static str,
+) -> Result<Option<u64>, ViewError> {
+    match map.get(keyword) {
+        None => Ok(None),
+        Some(v) => Ok(Some(v.as_u64().ok_or(ViewError::InvalidKeywordType {
+            keyword,
+            expected: "a non-negative integer",
+        })?)),
+    }
+}
+
+/// Check if the schema restricts to integer values (type: "integer" or multipleOf: 1).
+fn is_integer_domain(map: &serde_json::Map<String, Value>) -> bool {
+    if let Some(ty) = map.get("type")
+        && ty.as_str() == Some("integer")
+    {
+        return true;
+    }
+    if let Some(m) = map.get("multipleOf")
+        && m.as_f64() == Some(1.0)
+    {
+        return true;
+    }
+    false
+}
+
+/// Compute effective upper bound from maximum and exclusiveMaximum,
+/// with integer normalization when applicable.
+fn effective_upper_bound(
+    maximum: Option<f64>,
+    exclusive_maximum: Option<f64>,
+    integer: bool,
+) -> Bound {
+    let max_bound = maximum.map(Bound::Inclusive);
+    let excl_bound = exclusive_maximum.map(|e| {
+        if integer {
+            // For integers, x < N ≡ x ≤ N-1
+            Bound::Inclusive(e - 1.0)
+        } else {
+            Bound::Exclusive(e)
+        }
+    });
+
+    match (max_bound, excl_bound) {
+        (None, None) => Bound::Unbounded,
+        (Some(b), None) | (None, Some(b)) => b,
+        (Some(Bound::Inclusive(m)), Some(Bound::Inclusive(e))) => Bound::Inclusive(m.min(e)),
+        (Some(Bound::Inclusive(m)), Some(Bound::Exclusive(e))) => {
+            if m < e {
+                Bound::Inclusive(m)
+            } else {
+                Bound::Exclusive(e)
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+/// Compute effective lower bound from minimum and exclusiveMinimum,
+/// with integer normalization when applicable.
+fn effective_lower_bound(
+    minimum: Option<f64>,
+    exclusive_minimum: Option<f64>,
+    integer: bool,
+) -> Bound {
+    let min_bound = minimum.map(Bound::Inclusive);
+    let excl_bound = exclusive_minimum.map(|e| {
+        if integer {
+            // For integers, x > N ≡ x ≥ N+1
+            Bound::Inclusive(e + 1.0)
+        } else {
+            Bound::Exclusive(e)
+        }
+    });
+
+    match (min_bound, excl_bound) {
+        (None, None) => Bound::Unbounded,
+        (Some(b), None) | (None, Some(b)) => b,
+        (Some(Bound::Inclusive(m)), Some(Bound::Inclusive(e))) => Bound::Inclusive(m.max(e)),
+        (Some(Bound::Inclusive(m)), Some(Bound::Exclusive(e))) => {
+            if m > e {
+                Bound::Inclusive(m)
+            } else {
+                Bound::Exclusive(e)
+            }
+        }
+        _ => unreachable!(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Get<K> implementations for serde_json::Value
+// ---------------------------------------------------------------------------
+
+impl Get<TypeKw> for Value {
+    fn get(&self) -> Result<Option<TypeSet>, ViewError> {
+        let Some(obj) = self.as_object() else {
+            return Ok(None);
+        };
+        let mut ts = match obj.get("type") {
+            None => {
+                // multipleOf: 1 implies integer domain for subtyping purposes
+                if is_integer_domain(obj) {
+                    return Ok(Some(TypeSet::INTEGER));
+                }
+                return Ok(None);
+            }
+            Some(v) => parse_type_set(v)?,
+        };
+        // multipleOf: 1 with type: "number" → effectively integer
+        if ts.contains(TypeSet::NUMBER) && is_integer_domain(obj) {
+            ts = (ts - TypeSet::NUMBER) | TypeSet::INTEGER;
+        }
+        if ts == TypeSet::all() {
+            Ok(None)
+        } else {
+            Ok(Some(ts))
+        }
+    }
+}
+
+// --- Combined numeric bounds ---
+
+impl Get<UpperBoundKw> for Value {
+    fn get(&self) -> Result<Bound, ViewError> {
+        let Some(obj) = self.as_object() else {
+            return Ok(Bound::Unbounded);
+        };
+        let maximum = get_opt_f64(obj, "maximum")?;
+        let exclusive_maximum = get_opt_f64(obj, "exclusiveMaximum")?;
+        let integer = is_integer_domain(obj);
+        Ok(effective_upper_bound(maximum, exclusive_maximum, integer))
+    }
+}
+
+impl Get<LowerBoundKw> for Value {
+    fn get(&self) -> Result<Bound, ViewError> {
+        let Some(obj) = self.as_object() else {
+            return Ok(Bound::Unbounded);
+        };
+        let minimum = get_opt_f64(obj, "minimum")?;
+        let exclusive_minimum = get_opt_f64(obj, "exclusiveMinimum")?;
+        let integer = is_integer_domain(obj);
+        Ok(effective_lower_bound(minimum, exclusive_minimum, integer))
+    }
+}
+
+// --- MultipleOf ---
+
+impl Get<MultipleOfKw> for Value {
+    fn get(&self) -> Result<Option<f64>, ViewError> {
+        let Some(obj) = self.as_object() else {
+            return Ok(None);
+        };
+        let m = get_opt_f64(obj, "multipleOf")?;
+        if m.is_some() {
+            return Ok(m);
+        }
+        // type: "integer" implies multipleOf: 1
+        if let Some(ty) = obj.get("type")
+            && ty.as_str() == Some("integer")
+        {
+            return Ok(Some(1.0));
+        }
+        Ok(None)
+    }
+}
+
+// --- Integer upper/lower bounds ---
+
+macro_rules! impl_get_opt_u64 {
+    ($kw:ty, $json_key:expr) => {
+        impl Get<$kw> for Value {
+            fn get(&self) -> Result<Option<u64>, ViewError> {
+                let Some(obj) = self.as_object() else {
+                    return Ok(None);
+                };
+                get_opt_u64(obj, $json_key)
+            }
+        }
+    };
+}
+
+impl_get_opt_u64!(MaxLengthKw, "maxLength");
+impl_get_opt_u64!(MinLengthKw, "minLength");
+impl_get_opt_u64!(MaxItemsKw, "maxItems");
+impl_get_opt_u64!(MinItemsKw, "minItems");
+impl_get_opt_u64!(MaxContainsKw, "maxContains");
+impl_get_opt_u64!(MinContainsKw, "minContains");
+impl_get_opt_u64!(MaxPropertiesKw, "maxProperties");
+impl_get_opt_u64!(MinPropertiesKw, "minProperties");
+
+// --- UniqueItems ---
+
+impl Get<UniqueItemsKw> for Value {
+    fn get(&self) -> Result<bool, ViewError> {
+        let Some(obj) = self.as_object() else {
+            return Ok(false);
+        };
+        match obj.get("uniqueItems") {
+            None => Ok(false),
+            Some(v) => Ok(v.as_bool().ok_or(ViewError::InvalidKeywordType {
+                keyword: "uniqueItems",
+                expected: "a boolean",
+            })?),
+        }
+    }
+}
+
+// --- Required ---
+
+impl Get<RequiredKw> for Value {
+    fn get(&self) -> Result<Vec<&str>, ViewError> {
+        let Some(obj) = self.as_object() else {
+            return Ok(Vec::new());
+        };
+        match obj.get("required") {
+            None => Ok(Vec::new()),
+            Some(v) => {
+                let arr = v.as_array().ok_or(ViewError::InvalidKeywordType {
+                    keyword: "required",
+                    expected: "an array of strings",
+                })?;
+                Ok(arr.iter().filter_map(|v| v.as_str()).collect())
+            }
+        }
+    }
+}
+
+// --- Const ---
+
+impl Get<ConstKw> for Value {
+    fn get(&self) -> Result<Option<JsonValue>, ViewError> {
+        let Some(obj) = self.as_object() else {
+            return Ok(None);
+        };
+        Ok(obj.get("const").map(JsonValue::from))
+    }
+}
+
+// --- Enum ---
+
+impl Get<EnumKw> for Value {
+    fn get(&self) -> Result<Option<Vec<JsonValue>>, ViewError> {
+        let Some(obj) = self.as_object() else {
+            return Ok(None);
+        };
+        match obj.get("enum") {
+            None => Ok(None),
+            Some(v) => {
+                let arr = v.as_array().ok_or(ViewError::InvalidKeywordType {
+                    keyword: "enum",
+                    expected: "an array",
+                })?;
+                Ok(Some(arr.iter().map(JsonValue::from).collect()))
+            }
+        }
+    }
+}
+
+// --- Optional applicators (Option<&Self>) ---
+
+macro_rules! impl_get_optional_applicator {
+    ($kw:ty, $json_key:expr) => {
+        impl Get<$kw> for Value {
+            fn get(&self) -> Result<Option<&Self>, ViewError> {
+                let Some(obj) = self.as_object() else {
+                    return Ok(None);
+                };
+                Ok(obj.get($json_key))
+            }
+        }
+    };
+}
+
+impl_get_optional_applicator!(ItemsKw, "items");
+impl_get_optional_applicator!(ContainsKw, "contains");
+impl_get_optional_applicator!(AdditionalPropertiesKw, "additionalProperties");
+impl_get_optional_applicator!(PropertyNamesKw, "propertyNames");
+
+// --- Properties (key-value applicators with top-schema detection) ---
+
+macro_rules! impl_get_kv_applicator {
+    ($kw:ty, $json_key:expr) => {
+        impl Get<$kw> for Value {
+            fn get(&self) -> Result<Vec<(&str, Option<&Self>)>, ViewError> {
+                let Some(obj) = self.as_object() else {
+                    return Ok(Vec::new());
+                };
+                match obj.get($json_key) {
+                    None => Ok(Vec::new()),
+                    Some(v) => {
+                        let props = v.as_object().ok_or(ViewError::InvalidKeywordType {
+                            keyword: $json_key,
+                            expected: "an object",
+                        })?;
+                        Ok(props
+                            .iter()
+                            .map(|(k, v)| {
+                                // Mark top schemas as None so keyword comparison
+                                // can distinguish "present but unconstrained" from "constrained"
+                                let child = match v.kind() {
+                                    Ok(SchemaKind::Top) => None,
+                                    _ => Some(v),
+                                };
+                                (k.as_str(), child)
+                            })
+                            .collect())
+                    }
+                }
+            }
+        }
+    };
+}
+
+impl_get_kv_applicator!(PropertiesKw, "properties");
+impl_get_kv_applicator!(PatternPropertiesKw, "patternProperties");
+
+// --- PrefixItems ---
+
+impl Get<PrefixItemsKw> for Value {
+    fn get(&self) -> Result<Vec<&Self>, ViewError> {
+        let Some(obj) = self.as_object() else {
+            return Ok(Vec::new());
+        };
+        match obj.get("prefixItems") {
+            None => Ok(Vec::new()),
+            Some(v) => {
+                let arr = v.as_array().ok_or(ViewError::InvalidKeywordType {
+                    keyword: "prefixItems",
+                    expected: "an array of schemas",
+                })?;
+                Ok(arr.iter().collect())
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
     use super::*;
 
-    /// Helper: call try_view and unwrap the Schema variant's object.
-    fn view_obj(v: &Value) -> SchemaObject<&str, &Value> {
-        match v.try_view().unwrap() {
-            SchemaF::Schema(obj) => *obj,
-            other => panic!("expected SchemaF::Schema, got {other:?}"),
-        }
-    }
-
-    // -----------------------------------------------------------------------
-    // Boolean schemas
-    // -----------------------------------------------------------------------
-
     #[test]
     fn bool_true_is_top() {
-        assert!(matches!(json!(true).try_view().unwrap(), SchemaF::True));
+        assert_eq!(json!(true).kind().unwrap(), SchemaKind::Top);
     }
 
     #[test]
     fn bool_false_is_bottom() {
-        assert!(matches!(json!(false).try_view().unwrap(), SchemaF::False));
+        assert_eq!(json!(false).kind().unwrap(), SchemaKind::Bottom);
     }
 
-    // -----------------------------------------------------------------------
-    // Invalid schemas
-    // -----------------------------------------------------------------------
+    #[test]
+    fn empty_object_is_top() {
+        assert_eq!(json!({}).kind().unwrap(), SchemaKind::Top);
+    }
+
+    #[test]
+    fn all_types_is_top() {
+        let v = json!({"type": ["null", "boolean", "object", "array", "number", "string", "integer"]});
+        assert_eq!(v.kind().unwrap(), SchemaKind::Top);
+    }
+
+    #[test]
+    fn not_false_is_top() {
+        assert_eq!(json!({"not": false}).kind().unwrap(), SchemaKind::Top);
+    }
+
+    #[test]
+    fn not_true_is_bottom() {
+        assert_eq!(json!({"not": true}).kind().unwrap(), SchemaKind::Bottom);
+    }
+
+    #[test]
+    fn not_empty_object_is_bottom() {
+        assert_eq!(json!({"not": {}}).kind().unwrap(), SchemaKind::Bottom);
+    }
+
+    #[test]
+    fn not_all_types_is_bottom() {
+        let v = json!({"not": {"type": ["null", "boolean", "object", "array", "number", "string", "integer"]}});
+        assert_eq!(v.kind().unwrap(), SchemaKind::Bottom);
+    }
+
+    #[test]
+    fn not_not_true_is_top() {
+        assert_eq!(
+            json!({"not": {"not": true}}).kind().unwrap(),
+            SchemaKind::Top
+        );
+    }
 
     #[test]
     fn null_is_invalid() {
-        let err = json!(null).try_view().unwrap_err();
+        let err = json!(null).kind().unwrap_err();
         assert!(matches!(err, ViewError::InvalidSchema { found: "null" }));
     }
 
     #[test]
-    fn number_is_invalid() {
-        let err = json!(42).try_view().unwrap_err();
-        assert!(matches!(err, ViewError::InvalidSchema { found: "number" }));
+    fn min_gt_max_is_bottom() {
+        assert_eq!(
+            json!({"minimum": 10, "maximum": 5}).kind().unwrap(),
+            SchemaKind::Bottom
+        );
     }
 
     #[test]
-    fn string_is_invalid() {
-        let err = json!("hello").try_view().unwrap_err();
-        assert!(matches!(err, ViewError::InvalidSchema { found: "string" }));
+    fn upper_bound_combined() {
+        let v = json!({"maximum": 10, "exclusiveMaximum": 8});
+        let b: Bound = <Value as Get<UpperBoundKw>>::get(&v).unwrap();
+        assert_eq!(b, Bound::Exclusive(8.0));
     }
 
     #[test]
-    fn array_is_invalid() {
-        let err = json!([1, 2]).try_view().unwrap_err();
-        assert!(matches!(err, ViewError::InvalidSchema { found: "array" }));
-    }
-
-    // -----------------------------------------------------------------------
-    // Empty object = unconstrained
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn empty_object_has_defaults() {
-        let v = json!({});
-        let obj = view_obj(&v);
-        assert_eq!(obj.r#type, TypeSet::all());
-        assert_eq!(obj.min_length, 0);
-        assert_eq!(obj.min_items, 0);
-        assert_eq!(obj.min_properties, 0);
-        assert!(!obj.unique_items);
-        assert!(obj.properties.is_empty());
-        assert!(obj.required.is_empty());
-        assert!(obj.all_of.is_empty());
-        assert!(obj.maximum.is_none());
-        assert!(obj.items.is_none());
-        assert!(obj.not.is_none());
-    }
-
-    // -----------------------------------------------------------------------
-    // type keyword
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn type_single_string() {
-        let v = json!({"type": "string"});
-        let obj = view_obj(&v);
-        assert_eq!(obj.r#type, TypeSet::STRING);
+    fn upper_bound_integer_normalization() {
+        let v = json!({"exclusiveMaximum": 11, "type": "integer"});
+        let b: Bound = <Value as Get<UpperBoundKw>>::get(&v).unwrap();
+        assert_eq!(b, Bound::Inclusive(10.0));
     }
 
     #[test]
-    fn type_array_of_types() {
-        let v = json!({"type": ["string", "null"]});
-        let obj = view_obj(&v);
-        assert_eq!(obj.r#type, TypeSet::STRING | TypeSet::NULL);
+    fn lower_bound_integer_normalization() {
+        let v = json!({"exclusiveMinimum": 9, "type": "integer"});
+        let b: Bound = <Value as Get<LowerBoundKw>>::get(&v).unwrap();
+        assert_eq!(b, Bound::Inclusive(10.0));
     }
 
     #[test]
-    fn type_unknown_name_errors() {
-        let err = json!({"type": "foo"}).try_view().unwrap_err();
-        assert!(matches!(err, ViewError::UnknownTypeName { name } if name == "foo"));
-    }
-
-    #[test]
-    fn type_invalid_value_errors() {
-        let err = json!({"type": 42}).try_view().unwrap_err();
-        assert!(matches!(
-            err,
-            ViewError::InvalidKeywordType {
-                keyword: "type",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn type_array_with_non_string_errors() {
-        let err = json!({"type": ["string", 42]}).try_view().unwrap_err();
-        assert!(matches!(
-            err,
-            ViewError::InvalidKeywordType {
-                keyword: "type",
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn type_array_with_unknown_name_errors() {
-        let err = json!({"type": ["string", "bogus"]}).try_view().unwrap_err();
-        assert!(matches!(err, ViewError::UnknownTypeName { name } if name == "bogus"));
-    }
-
-    // -----------------------------------------------------------------------
-    // Numeric keywords
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn numeric_constraints() {
-        let v = json!({
-            "multipleOf": 5,
-            "maximum": 100,
-            "exclusiveMaximum": 100.5,
-            "minimum": 0,
-            "exclusiveMinimum": -0.5
-        });
-        let obj = view_obj(&v);
-        assert_eq!(obj.multiple_of, Some(5.0));
-        assert_eq!(obj.maximum, Some(100.0));
-        assert_eq!(obj.exclusive_maximum, Some(100.5));
-        assert_eq!(obj.minimum, Some(0.0));
-        assert_eq!(obj.exclusive_minimum, Some(-0.5));
-    }
-
-    #[test]
-    fn numeric_invalid_type_errors() {
-        let err = json!({"maximum": "ten"}).try_view().unwrap_err();
-        assert!(matches!(
-            err,
-            ViewError::InvalidKeywordType {
-                keyword: "maximum",
-                ..
-            }
-        ));
-    }
-
-    // -----------------------------------------------------------------------
-    // String keywords
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn string_constraints() {
-        let v = json!({
-            "minLength": 1,
-            "maxLength": 255,
-            "pattern": "^[a-z]+$"
-        });
-        let obj = view_obj(&v);
-        assert_eq!(obj.min_length, 1);
-        assert_eq!(obj.max_length, Some(255));
-        assert_eq!(obj.pattern, Some("^[a-z]+$"));
-    }
-
-    // -----------------------------------------------------------------------
-    // Array keywords
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn array_constraints() {
-        let v = json!({
-            "minItems": 1,
-            "maxItems": 10,
-            "uniqueItems": true,
-            "minContains": 2,
-            "maxContains": 5
-        });
-        let obj = view_obj(&v);
-        assert_eq!(obj.min_items, 1);
-        assert_eq!(obj.max_items, Some(10));
-        assert!(obj.unique_items);
-        assert_eq!(obj.min_contains, Some(2));
-        assert_eq!(obj.max_contains, Some(5));
-    }
-
-    #[test]
-    fn prefix_items_and_items() {
-        let v = json!({
-            "prefixItems": [{"type": "string"}, {"type": "number"}],
-            "items": {"type": "integer"}
-        });
-        let obj = view_obj(&v);
-        assert_eq!(obj.prefix_items.len(), 2);
-        assert!(obj.items.is_some());
-    }
-
-    // -----------------------------------------------------------------------
-    // Object keywords
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn object_constraints() {
-        let v = json!({
-            "minProperties": 1,
-            "maxProperties": 10,
-            "required": ["foo", "bar"]
-        });
-        let obj = view_obj(&v);
-        assert_eq!(obj.min_properties, 1);
-        assert_eq!(obj.max_properties, Some(10));
-        assert_eq!(obj.required, vec!["foo", "bar"]);
-    }
-
-    #[test]
-    fn properties_parsed() {
-        let v = json!({
-            "properties": {
-                "name": {"type": "string"},
-                "age": {"type": "integer"}
-            }
-        });
-        let obj = view_obj(&v);
-        assert_eq!(obj.properties.len(), 2);
-        let keys: Vec<&str> = obj.properties.iter().map(|(k, _)| *k).collect();
-        assert!(keys.contains(&"name"));
-        assert!(keys.contains(&"age"));
-    }
-
-    #[test]
-    fn properties_invalid_type_errors() {
-        let err = json!({"properties": [1, 2]}).try_view().unwrap_err();
-        assert!(matches!(
-            err,
-            ViewError::InvalidKeywordType {
-                keyword: "properties",
-                ..
-            }
-        ));
-    }
-
-    // -----------------------------------------------------------------------
-    // Applicator keywords
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn composition_applicators() {
-        let v = json!({
-            "allOf": [{"type": "object"}],
-            "anyOf": [{"type": "string"}, {"type": "number"}],
-            "oneOf": [{"const": 1}, {"const": 2}],
-            "not": {"type": "null"}
-        });
-        let obj = view_obj(&v);
-        assert_eq!(obj.all_of.len(), 1);
-        assert_eq!(obj.any_of.len(), 2);
-        assert_eq!(obj.one_of.len(), 2);
-        assert!(obj.not.is_some());
-    }
-
-    #[test]
-    fn conditional_applicators() {
-        let v = json!({
-            "if": {"type": "string"},
-            "then": {"minLength": 1},
-            "else": {"type": "number"}
-        });
-        let obj = view_obj(&v);
-        assert!(obj.r#if.is_some());
-        assert!(obj.then.is_some());
-        assert!(obj.r#else.is_some());
-    }
-
-    #[test]
-    fn allof_invalid_type_errors() {
-        let err = json!({"allOf": "not-an-array"}).try_view().unwrap_err();
-        assert!(matches!(
-            err,
-            ViewError::InvalidKeywordType {
-                keyword: "allOf",
-                ..
-            }
-        ));
-    }
-
-    // -----------------------------------------------------------------------
-    // const / enum
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn const_keyword() {
-        let v = json!({"const": "hello"});
-        let obj = view_obj(&v);
-        assert_eq!(obj.r#const, Some(JsonValue::String("hello".into())));
-    }
-
-    #[test]
-    fn enum_keyword() {
-        let v = json!({"enum": [1, "two", null]});
-        let obj = view_obj(&v);
-        let values = obj.r#enum.unwrap();
-        assert_eq!(values.len(), 3);
-    }
-
-    // -----------------------------------------------------------------------
-    // Recursive children are references into the original Value
-    // -----------------------------------------------------------------------
-
-    #[test]
-    fn children_borrow_from_original() {
-        let v = json!({"properties": {"x": {"type": "string"}}});
-        let obj = view_obj(&v);
-        let (key, child) = &obj.properties[0];
-        assert_eq!(*key, "x");
-        // The child is a reference into the original serde_json::Value tree.
-        let child_obj = match child.try_view().unwrap() {
-            SchemaF::Schema(obj) => *obj,
-            other => panic!("expected Schema, got {other:?}"),
-        };
-        assert_eq!(child_obj.r#type, TypeSet::STRING);
+    fn properties_top_detection() {
+        let v = json!({"properties": {"a": {"type": "string"}, "b": {}}});
+        let props: Vec<(&str, Option<&Value>)> = <Value as Get<PropertiesKw>>::get(&v).unwrap();
+        let a = props.iter().find(|(k, _)| *k == "a").unwrap();
+        let b = props.iter().find(|(k, _)| *k == "b").unwrap();
+        assert!(a.1.is_some()); // "a" is constrained
+        assert!(b.1.is_none()); // "b" is top (unconstrained)
     }
 }

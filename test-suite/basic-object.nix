@@ -65,23 +65,23 @@
       cases = [
         {
           sup = {
-            minProperties = 10;
-            maxProperties = 5;
-          };
-          sub = {
             minProperties = 5;
             maxProperties = 10;
+          };
+          sub = {
+            minProperties = 10;
+            maxProperties = 5;
           };
           result = true;
         }
         {
           sup = {
-            minProperties = 5;
-            maxProperties = 10;
-          };
-          sub = {
             minProperties = 10;
             maxProperties = 5;
+          };
+          sub = {
+            minProperties = 5;
+            maxProperties = 10;
           };
           result = false;
         }
