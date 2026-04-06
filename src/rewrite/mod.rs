@@ -1,3 +1,6 @@
+pub mod canonicalize;
+pub mod simplify;
+
 use crate::error::SubtypeError;
 use crate::located::{JsonF, LocatedValue, Provenance};
 
@@ -22,7 +25,55 @@ pub trait RewriteRule: 'static {
     ) -> Result<Option<JsonF<LocatedValue>>, SubtypeError>;
 }
 
+/// JSON Schema keywords whose values are data (not sub-schemas).
+/// The rewrite traversal must NOT recurse into these values, since rewrite
+/// rules are schema-level transforms and would corrupt plain JSON data
+/// (e.g., an object inside `const` or `enum`).
+const DATA_VALUE_KEYS: &[&str] = &[
+    "const",
+    "enum",
+    "default",
+    "examples",
+    "required",
+    "dependentRequired",
+    // Scalars below are harmless (no rules fire on them), but listed for clarity.
+    "$schema",
+    "$comment",
+    "$id",
+    "$anchor",
+    "title",
+    "description",
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "format",
+    "minItems",
+    "maxItems",
+    "uniqueItems",
+    "minProperties",
+    "maxProperties",
+    "minContains",
+    "maxContains",
+    "readOnly",
+    "writeOnly",
+    "deprecated",
+    "contentMediaType",
+    "contentEncoding",
+    "$ref",
+    "$dynamicRef",
+    "$dynamicAnchor",
+];
+
 /// Apply all rules to a tree, bottom-up, to fixed point per node.
+///
+/// The traversal is schema-aware: it only recurses into object values
+/// whose keys indicate sub-schemas (e.g., `properties`, `items`, `allOf`).
+/// Values of data-only keys (e.g., `const`, `enum`) are left untouched.
 pub fn rewrite_phase(
     tree: &LocatedValue,
     rules: &[Box<dyn RewriteRule>],
@@ -31,7 +82,7 @@ pub fn rewrite_phase(
         return Ok(tree.clone());
     }
 
-    // Bottom-up: first rewrite all children
+    // Bottom-up: first rewrite all children (schema-aware for objects)
     let rewritten_children = match &tree.node {
         JsonF::Null | JsonF::Bool(_) | JsonF::Number(_) | JsonF::String(_) => tree.node.clone(),
         JsonF::Array(items) => {
@@ -44,7 +95,17 @@ pub fn rewrite_phase(
         JsonF::Object(pairs) => {
             let new_pairs = pairs
                 .iter()
-                .map(|(k, v)| Ok((k.clone(), rewrite_phase(v, rules)?)))
+                .map(|(k, v)| {
+                    let is_data = k
+                        .as_str()
+                        .is_some_and(|s| DATA_VALUE_KEYS.contains(&s));
+                    let new_v = if is_data {
+                        v.clone()
+                    } else {
+                        rewrite_phase(v, rules)?
+                    };
+                    Ok((k.clone(), new_v))
+                })
                 .collect::<Result<Vec<_>, _>>()?;
             JsonF::Object(new_pairs)
         }
