@@ -156,7 +156,8 @@ pub enum ReducedSchema {
     Bottom(Provenance),
     Typed(TypedSchema),
     AnyOf(Provenance, Vec<ReducedSchema>),
-    AllOfNot(Provenance, Vec<ReducedSchema>),
+    AllOf(Provenance, Vec<ReducedSchema>),
+    Not(Provenance, Box<ReducedSchema>),
 }
 
 pub enum TypedSchema {
