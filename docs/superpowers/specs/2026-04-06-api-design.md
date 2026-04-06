@@ -122,22 +122,26 @@ Per-node rewrite rule trait:
 
 ```rust
 pub trait RewriteRule: 'static {
-    /// Attempt to rewrite a single node. Returns `Some(new_node)` if the rule
-    /// applies, `None` if the node is unchanged. This distinction drives
-    /// fixed-point iteration — the phase re-runs all rules on a node until
-    /// every rule returns `None`.
+    /// Attempt to rewrite a single node. Returns:
+    /// - `Ok(Some(new_node))` if the rule fires and produces a rewritten node
+    /// - `Ok(None)` if the rule doesn't apply to this node
+    /// - `Err(...)` if the node is malformed in a way this rule can detect
+    ///
+    /// The `Ok(None)` vs `Ok(Some(...))` distinction drives fixed-point
+    /// iteration — the phase re-runs all rules on a node until every rule
+    /// returns `Ok(None)`.
     fn rewrite(
         &self,
         prov: &Provenance,
         node: &JsonF<LocatedValue>,
-    ) -> Option<JsonF<LocatedValue>>;
+    ) -> Result<Option<JsonF<LocatedValue>>, SubtypeError>;
 }
 ```
 
 Rules within a phase are applied bottom-up (children fully rewritten before
 parent). All rules in a phase are applied repeatedly to each node until every
-rule returns `None` (fixed point). The node is passed by reference; rules that
-fire produce a new node.
+rule returns `Ok(None)` (fixed point). Errors abort the pipeline immediately.
+The node is passed by reference; rules that fire produce a new node.
 
 Built-in `$ref` resolution runs before all phases as an internal whole-tree pass.
 
