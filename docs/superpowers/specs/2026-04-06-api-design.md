@@ -364,8 +364,18 @@ let checker = SubtypeChecker::from_preset(preset);
   string schema canonicalization and subtype checking. Candidate: `regex-syntax`
   for parsing + custom algebra, or port of Python `greenery` library.
 
+## Assumptions
+
+- All input schemas are draft 2020-12. Schemas without a `$schema` field are
+  assumed to be 2020-12.
+- `Phase::DraftConversion` exists in the API but ships with no built-in rules.
+  Draft conversion (e.g., draft-04/07 to 2020-12) will be implemented later.
+  Schemas from other drafts will produce errors during extraction if they use
+  keywords with incompatible semantics.
+
 ## Out of Scope
 
+- Draft conversion rules (future — the phase exists but is empty initially)
 - Recursive `$ref` (mentioned in README as future work)
 - `unevaluatedProperties` / `unevaluatedItems` (future work)
 - Trait-based abstraction over JSON representations (future refactor)
