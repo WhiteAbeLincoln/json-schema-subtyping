@@ -1,109 +1,99 @@
+use std::ops::Range;
+
 use snafu::Snafu;
 
-pub mod output;
-pub mod schema;
+/// Represents a specific location in the JSON Schema where an error occurred.
+pub struct Location {
+    /// A json pointer to the location in the schema where the error occurred.
+    pointer: String,
+    /// The original source location in the input schema string for error reporting.
+    source_location: Range<usize>,
+    line: usize,
+    column: usize,
+}
 
-#[cfg(feature = "serde")]
-mod serde_impl;
+pub struct DetailedOutput {
+    // TODO: output including relevant schema locations and a human-readable error message
+}
 
-pub use output::{FilePosition, JsonPointer, Location};
-pub use schema::{
-    Draft2020_12, Get, JsonValue, Keyword, QuerySchema, SchemaKind, TypeSet, check_keywords,
-};
-#[cfg(feature = "serde")]
-pub use serde_impl::ViewError;
-
-use crate::output::{DetailedOutput, OutputError};
-
+/// Represents the result of a subtype check.
 pub enum SubtypeRelation {
+    /// `sub` is a subtype of `sup`.
     Subtype,
+    /// `sub` is not a subtype of `sup`, with details about the failure.
     NotSubtype(DetailedOutput),
 }
 
 #[derive(Debug, Snafu)]
 pub enum SubtypeError {
+    /// The schema is invalid and cannot be processed.
     #[snafu(display("{source}"))]
     InvalidSchema {
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    /// Unsupported schema features that prevent subtype checking.
+    #[snafu(display("Unsupported schema features: {details}"))]
+    UnsupportedFeatures { details: String },
 }
 
-fn not_subtype() -> SubtypeRelation {
-    SubtypeRelation::NotSubtype(DetailedOutput {
-        supertype_location: Location {
-            path: String::new(),
-            file_position: None,
-        },
-        subtype_location: Location {
-            path: String::new(),
-            file_position: None,
-        },
-        error: OutputError::Basic("not a subtype".to_string()),
-    })
+#[derive(Debug, Clone, Copy)]
+pub struct SubtypeChecker {
+    options: SubtypeCheckerOptions,
 }
 
-/// Checks if `sub` is a subtype of `sup` according to the JSON Schema specification.
-pub fn is_subtype<A: Draft2020_12, B: Draft2020_12>(
-    sup: &A,
-    sub: &B,
-) -> Result<SubtypeRelation, SubtypeError>
-where
-    A::Error: Into<SubtypeError>,
-    B::Error: Into<SubtypeError>,
-{
-    use SchemaKind::*;
+/// Options for the subtype checker.
+/// Contains the rewrite and inference rules.
+#[derive(Debug, Clone, Copy)]
+pub struct SubtypeCheckerOptions {}
 
-    let sup_kind = sup.kind().map_err(Into::into)?;
-    let sub_kind = sub.kind().map_err(Into::into)?;
+/// Represents a parsed JSON Schema.
+/// All rewritten forms point back to the original source locations for error reporting.
+#[derive(Debug, Clone, Copy)]
+pub struct ParsedSchema<'a> {
+    source: &'a str,
+    // need to hold on to options which defines
+    // the canonicalization, simplification, and inference rules
+}
 
-    match (sup_kind, sub_kind) {
-        // Everything is a subtype of top
-        (Top, _) => Ok(SubtypeRelation::Subtype),
-        // Bottom is a subtype of everything
-        (_, Bottom) => Ok(SubtypeRelation::Subtype),
-        // Nothing else is a subtype of bottom
-        (Bottom, _) => Ok(not_subtype()),
-        // Constrained vs Top or Constrained: compare keywords
-        (Constrained, Top) | (Constrained, Constrained) => {
-            let mut error: Option<SubtypeError> = None;
-            let mut callback = |sub_child: &B, sup_child: &A| -> bool {
-                if error.is_some() {
-                    return false;
-                }
-                match is_subtype(sup_child, sub_child) {
-                    Ok(SubtypeRelation::Subtype) => true,
-                    Ok(SubtypeRelation::NotSubtype(_)) => false,
-                    Err(e) => {
-                        error = Some(e);
-                        false
-                    }
-                }
-            };
+impl SubtypeChecker {
+    /// Checks if `sub` is a subtype of `sup` according to the JSON Schema specification.
+    pub fn is_subtype(sup: &str, sub: &str) -> Result<SubtypeRelation, SubtypeError> {
+        // step 1: parse the schemas
+        // step 2: for each schema: convert to 2020 draft, canonicalize, and simplify
+        // step 3: check if `sub` is a subtype of `sup`
+        todo!()
+    }
 
-            let result: Result<bool, SubtypeError> =
-                check_keywords(sub, sup, &mut callback);
-
-            if let Some(e) = error {
-                return Err(e);
-            }
-
-            if result? {
-                Ok(SubtypeRelation::Subtype)
-            } else {
-                Ok(not_subtype())
-            }
-        }
+    /// Parses a JSON Schema string into an internal representation suitable for subtype checking.
+    pub fn parse_schema<'a>(
+        schema: &str,
+        name: Option<String>,
+    ) -> Result<ParsedSchema<'a>, SubtypeError> {
+        todo!()
     }
 }
 
-// Infallible schemas satisfy the Into<SubtypeError> bound automatically
-// via the blanket `From<Infallible>` impl in std.
+impl<'a> ParsedSchema<'a> {
+    /// Rewrites equivalent schemas into a canonical form to facilitate comparison
+    pub fn canonicalize(&mut self) -> Result<(), SubtypeError> {
+        todo!()
+    }
 
-#[cfg(feature = "serde")]
-impl From<ViewError> for SubtypeError {
-    fn from(e: ViewError) -> Self {
-        SubtypeError::InvalidSchema {
-            source: Box::new(e),
-        }
+    /// Converts a non-draft-2020 schema to draft-2020, preserving semantics
+    pub fn to_draft_2020(&mut self) -> Result<(), SubtypeError> {
+        todo!()
+    }
+
+    /// Further simplifies the schema by removing redundant constructs.
+    pub fn simplify(&mut self) -> Result<(), SubtypeError> {
+        todo!()
+    }
+
+    /// Checks if `self` is a subtype of `other` according to the JSON Schema specification.
+    pub fn is_subtype_of<'b>(
+        &self,
+        other: &ParsedSchema<'b>,
+    ) -> Result<SubtypeRelation, SubtypeError> {
+        todo!()
     }
 }
