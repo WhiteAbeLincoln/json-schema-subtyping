@@ -43,7 +43,7 @@ fn validate_rewrites_preserve_semantics(rules: &[Box<dyn RewriteRule>]) {
 
     for entry in std::fs::read_dir(&suite_dir).unwrap() {
         let entry = entry.unwrap();
-        if !entry.path().extension().is_some_and(|e| e == "json") {
+        if entry.path().extension().is_none_or(|e| e != "json") {
             continue;
         }
 

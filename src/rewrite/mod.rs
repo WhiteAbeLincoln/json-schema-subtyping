@@ -200,12 +200,12 @@ mod tests {
             _prov: &Provenance,
             node: &JsonF<LocatedValue>,
         ) -> Result<Option<JsonF<LocatedValue>>, SubtypeError> {
-            if let JsonF::Number(n) = node {
-                if *n < 0.0 {
-                    return Err(SubtypeError::RewriteFailed {
-                        message: "negative number".into(),
-                    });
-                }
+            if let JsonF::Number(n) = node
+                && *n < 0.0
+            {
+                return Err(SubtypeError::RewriteFailed {
+                    message: "negative number".into(),
+                });
             }
             Ok(None)
         }

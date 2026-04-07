@@ -10,6 +10,7 @@ pub struct TestGroup {
 }
 
 #[derive(Deserialize)]
+#[allow(dead_code)]
 pub struct TestCase {
     pub description: String,
     pub data: Value,

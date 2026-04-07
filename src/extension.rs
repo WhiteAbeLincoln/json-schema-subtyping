@@ -11,6 +11,7 @@ pub struct SubtypeContext<'a> {
 }
 
 impl<'a> SubtypeContext<'a> {
+    #[cfg(test)]
     pub(crate) fn new() -> Self {
         Self {
             _phantom: std::marker::PhantomData,
@@ -41,10 +42,13 @@ pub trait VocabExtension: Send + Sync + 'static {
 }
 
 /// Type-erased wrapper around a VocabExtension.
+type ExtractFn = Box<dyn Fn(&HashMap<&str, &LocatedValue>) -> Result<Box<dyn Any + Send + Sync>, SubtypeError> + Send + Sync>;
+type CheckFn = Box<dyn Fn(&dyn Any, &dyn Any, &mut SubtypeContext<'_>) -> Result<SubtypeRelation, SubtypeError> + Send + Sync>;
+
 pub struct ExtensionSlot {
     pub keywords: Vec<String>,
-    extract_fn: Box<dyn Fn(&HashMap<&str, &LocatedValue>) -> Result<Box<dyn Any + Send + Sync>, SubtypeError> + Send + Sync>,
-    check_fn: Box<dyn Fn(&dyn Any, &dyn Any, &mut SubtypeContext<'_>) -> Result<SubtypeRelation, SubtypeError> + Send + Sync>,
+    extract_fn: ExtractFn,
+    check_fn: CheckFn,
 }
 
 impl ExtensionSlot {
