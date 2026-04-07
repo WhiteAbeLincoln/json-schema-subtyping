@@ -9,7 +9,7 @@ pub enum ReducedSchema {
     /// Bottom type — accepts nothing ({not: {}} or false).
     Bottom(Provenance),
     /// A type-homogeneous schema.
-    Typed(TypedSchema),
+    Typed(Box<TypedSchema>),
     /// Union of schemas. After simplification, elements are non-overlapping
     /// for primitives (may still overlap for arrays/objects).
     AnyOf(Provenance, Vec<ReducedSchema>),
@@ -38,13 +38,17 @@ pub struct BooleanSchema {
     pub enum_values: Located<BoolSet>,
 }
 
-/// After canonicalization, string schemas only have pattern
-/// (minLength/maxLength compiled into the regex).
+/// After canonicalization, string schemas have a pattern and optionally
+/// residual minLength/maxLength (when a pre-existing pattern prevented
+/// compilation — the intersection is deferred to subtype checking).
 #[derive(Debug)]
 pub struct StringSchema {
     pub provenance: Provenance,
-    /// The regex pattern. After canonicalization this encodes all string constraints.
+    /// The regex pattern (empty string means "match everything").
     pub pattern: Located<String>,
+    /// Residual length constraints when pattern + length coexist.
+    pub min_length: Option<Located<u64>>,
+    pub max_length: Option<Located<u64>>,
 }
 
 /// Number schemas retain all numeric keywords.

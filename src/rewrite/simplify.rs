@@ -435,15 +435,12 @@ impl RewriteRule for AllOfWithBottom {
 
         // Check if any element is bottom: {not: {}}
         let has_bottom = schemas.iter().any(|s| {
-            if let Some(inner_pairs) = s.as_object() {
-                if inner_pairs.len() == 1 {
-                    if let Some(not_val) = get_entry(inner_pairs, "not") {
-                        if let Some(not_pairs) = not_val.as_object() {
+            if let Some(inner_pairs) = s.as_object()
+                && inner_pairs.len() == 1
+                    && let Some(not_val) = get_entry(inner_pairs, "not")
+                        && let Some(not_pairs) = not_val.as_object() {
                             return not_pairs.is_empty();
                         }
-                    }
-                }
-            }
             false
         });
 
@@ -490,16 +487,13 @@ impl RewriteRule for FlattenAllOf {
 
         let mut flattened = Vec::new();
         for s in schemas {
-            if let Some(inner_pairs) = s.as_object() {
-                if inner_pairs.len() == 1 {
-                    if let Some(inner_allof) = get_entry(inner_pairs, "allOf") {
-                        if let Some(inner_schemas) = inner_allof.as_array() {
+            if let Some(inner_pairs) = s.as_object()
+                && inner_pairs.len() == 1
+                    && let Some(inner_allof) = get_entry(inner_pairs, "allOf")
+                        && let Some(inner_schemas) = inner_allof.as_array() {
                             flattened.extend(inner_schemas.iter().cloned());
                             continue;
                         }
-                    }
-                }
-            }
             flattened.push(s.clone());
         }
 
@@ -644,16 +638,13 @@ impl RewriteRule for FlattenAnyOf {
 
         let mut flattened = Vec::new();
         for s in schemas {
-            if let Some(inner_pairs) = s.as_object() {
-                if inner_pairs.len() == 1 {
-                    if let Some(inner_anyof) = get_entry(inner_pairs, "anyOf") {
-                        if let Some(inner_schemas) = inner_anyof.as_array() {
+            if let Some(inner_pairs) = s.as_object()
+                && inner_pairs.len() == 1
+                    && let Some(inner_anyof) = get_entry(inner_pairs, "anyOf")
+                        && let Some(inner_schemas) = inner_anyof.as_array() {
                             flattened.extend(inner_schemas.iter().cloned());
                             continue;
                         }
-                    }
-                }
-            }
             flattened.push(s.clone());
         }
 
@@ -688,15 +679,12 @@ impl RewriteRule for AnyOfRemoveBottom {
         };
 
         let is_bottom = |s: &LocatedValue| -> bool {
-            if let Some(inner_pairs) = s.as_object() {
-                if inner_pairs.len() == 1 {
-                    if let Some(not_val) = get_entry(inner_pairs, "not") {
-                        if let Some(not_pairs) = not_val.as_object() {
+            if let Some(inner_pairs) = s.as_object()
+                && inner_pairs.len() == 1
+                    && let Some(not_val) = get_entry(inner_pairs, "not")
+                        && let Some(not_pairs) = not_val.as_object() {
                             return not_pairs.is_empty();
                         }
-                    }
-                }
-            }
             false
         };
 

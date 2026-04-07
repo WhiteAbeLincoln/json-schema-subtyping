@@ -1,4 +1,5 @@
 pub mod canonicalize;
+pub mod ref_resolution;
 pub mod simplify;
 
 use crate::error::SubtypeError;
@@ -129,6 +130,7 @@ pub fn rewrite_phase(
 
     Ok(LocatedValue::new(tree.provenance.clone(), current))
 }
+
 
 #[cfg(test)]
 mod tests {

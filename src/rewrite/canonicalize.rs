@@ -58,7 +58,7 @@ fn without_keys(
 ) -> Vec<(LocatedValue, LocatedValue)> {
     pairs
         .iter()
-        .filter(|(k, _)| k.as_str().map_or(true, |s| !keys.contains(&s)))
+        .filter(|(k, _)| k.as_str().is_none_or(|s| !keys.contains(&s)))
         .cloned()
         .collect()
 }
@@ -67,7 +67,7 @@ fn without_keys(
 
 /// Keywords we don't yet support. Schemas containing these produce an error.
 const UNSUPPORTED_KEYWORDS: &[&str] = &[
-    "$ref",
+    "$ref", // resolved by pre-pass; error here means unresolved ref
     "$dynamicRef",
     "$dynamicAnchor",
     "unevaluatedItems",
@@ -86,13 +86,12 @@ impl RewriteRule for UnsupportedKeywords {
             return Ok(None);
         };
         for (k, _) in pairs {
-            if let Some(key) = k.as_str() {
-                if UNSUPPORTED_KEYWORDS.contains(&key) {
+            if let Some(key) = k.as_str()
+                && UNSUPPORTED_KEYWORDS.contains(&key) {
                     return Err(SubtypeError::UnsupportedFeatures {
                         details: format!("unsupported keyword: {key}"),
                     });
                 }
-            }
         }
         Ok(None)
     }
@@ -192,6 +191,57 @@ impl RewriteRule for IfThenElse {
     }
 }
 
+// --- Rule: all types with no validation keywords → top ({}) ---
+
+pub struct AllTypesIsTop;
+
+/// The basic JSON Schema types. "integer" counts as "number".
+const BASIC_TYPES: &[&str] = &["null", "boolean", "object", "array", "number", "string"];
+
+impl RewriteRule for AllTypesIsTop {
+    fn rewrite(
+        &self,
+        _prov: &Provenance,
+        node: &JsonF<LocatedValue>,
+    ) -> Result<Option<JsonF<LocatedValue>>, SubtypeError> {
+        let JsonF::Object(pairs) = node else {
+            return Ok(None);
+        };
+        let Some(type_val) = get_entry(pairs, "type") else {
+            return Ok(None);
+        };
+        let Some(types) = type_val.as_array() else {
+            return Ok(None);
+        };
+
+        // Check that all basic types are covered.
+        // "integer" counts toward "number" coverage.
+        let type_strs: Vec<&str> = types.iter().filter_map(|t| t.as_str()).collect();
+        let all_covered = BASIC_TYPES.iter().all(|basic| {
+            if *basic == "number" {
+                type_strs.contains(&"number") || type_strs.contains(&"integer")
+            } else {
+                type_strs.contains(basic)
+            }
+        });
+        if !all_covered {
+            return Ok(None);
+        }
+
+        // Check that all other keys are annotation-only.
+        let has_non_annotation = pairs.iter().any(|(k, _)| {
+            k.as_str()
+                .is_some_and(|s| s != "type" && !ANNOTATION_KEYS.contains(&s))
+        });
+        if has_non_annotation {
+            return Ok(None);
+        }
+
+        // All types present and no validation keywords — collapse to top.
+        Ok(Some(JsonF::Object(vec![])))
+    }
+}
+
 // --- Rule: multiple types → anyOf ---
 
 pub struct MultipleTypes;
@@ -221,7 +271,19 @@ impl RewriteRule for MultipleTypes {
             .iter()
             .map(|t| {
                 let mut branch_pairs = other_pairs.clone();
-                branch_pairs.push((make_string(prov, "type"), t.clone()));
+                // Convert "integer" → "number" + multipleOf: 1 inline,
+                // since newly created branches won't be reprocessed by IntegerToNumber.
+                if t.as_str() == Some("integer") {
+                    branch_pairs.push((make_string(prov, "type"), make_string(prov, "number")));
+                    if !has_key(&branch_pairs, "multipleOf") {
+                        branch_pairs.push((
+                            make_string(prov, "multipleOf"),
+                            synthetic(prov, JsonF::Number(1.0)),
+                        ));
+                    }
+                } else {
+                    branch_pairs.push((make_string(prov, "type"), t.clone()));
+                }
                 synthetic(prov, JsonF::Object(branch_pairs))
             })
             .collect();
@@ -282,7 +344,7 @@ impl RewriteRule for MultipleConnectives {
         let validation_keys: Vec<_> = pairs
             .iter()
             .filter(|(k, _)| {
-                k.as_str().map_or(true, |s| {
+                k.as_str().is_none_or(|s| {
                     !connectives.contains(&s) && !ANNOTATION_KEYS.contains(&s)
                 })
             })
@@ -444,6 +506,68 @@ impl RewriteRule for IntegerToNumber {
             ));
         }
         // If multipleOf already set, lcm(1, x) = x, so keep existing.
+
+        Ok(Some(JsonF::Object(new_pairs)))
+    }
+}
+
+// --- Rule: exclusive bounds → inclusive bounds for integers ---
+
+pub struct IntegerBoundConversion;
+
+impl RewriteRule for IntegerBoundConversion {
+    fn rewrite(
+        &self,
+        prov: &Provenance,
+        node: &JsonF<LocatedValue>,
+    ) -> Result<Option<JsonF<LocatedValue>>, SubtypeError> {
+        let JsonF::Object(pairs) = node else {
+            return Ok(None);
+        };
+
+        // Only fire when multipleOf == 1 (i.e. integer semantics).
+        let Some(mul) = get_entry(pairs, "multipleOf") else {
+            return Ok(None);
+        };
+        if mul.as_number() != Some(1.0) {
+            return Ok(None);
+        }
+
+        let ex_max = get_entry(pairs, "exclusiveMaximum").and_then(|v| v.as_number());
+        let ex_min = get_entry(pairs, "exclusiveMinimum").and_then(|v| v.as_number());
+
+        // Need at least one exclusive bound that is a whole number,
+        // and no conflicting inclusive bound already present.
+        let convert_max = ex_max
+            .filter(|n| n.fract() == 0.0)
+            .filter(|_| !has_key(pairs, "maximum"))
+            .is_some();
+        let convert_min = ex_min
+            .filter(|n| n.fract() == 0.0)
+            .filter(|_| !has_key(pairs, "minimum"))
+            .is_some();
+
+        if !convert_max && !convert_min {
+            return Ok(None);
+        }
+
+        let mut new_pairs = pairs.to_vec();
+
+        if convert_max {
+            new_pairs = without_key(&new_pairs, "exclusiveMaximum");
+            new_pairs.push((
+                make_string(prov, "maximum"),
+                synthetic(prov, JsonF::Number(ex_max.unwrap() - 1.0)),
+            ));
+        }
+
+        if convert_min {
+            new_pairs = without_key(&new_pairs, "exclusiveMinimum");
+            new_pairs.push((
+                make_string(prov, "minimum"),
+                synthetic(prov, JsonF::Number(ex_min.unwrap() + 1.0)),
+            ));
+        }
 
         Ok(Some(JsonF::Object(new_pairs)))
     }
@@ -703,8 +827,8 @@ impl RewriteRule for DependentRequired {
 
         let mut new_pairs = without_key(pairs, "dependentRequired");
         // Merge with existing dependentSchemas if present.
-        if let Some(existing) = get_entry(pairs, "dependentSchemas") {
-            if let Some(existing_pairs) = existing.as_object() {
+        if let Some(existing) = get_entry(pairs, "dependentSchemas")
+            && let Some(existing_pairs) = existing.as_object() {
                 let mut merged = existing_pairs.to_vec();
                 merged.extend(schema_pairs);
                 new_pairs = without_keys(&new_pairs, &["dependentSchemas"]);
@@ -714,7 +838,6 @@ impl RewriteRule for DependentRequired {
                 ));
                 return Ok(Some(JsonF::Object(new_pairs)));
             }
-        }
         new_pairs.push((
             make_string(prov, "dependentSchemas"),
             synthetic(prov, JsonF::Object(schema_pairs)),
@@ -879,6 +1002,74 @@ impl RewriteRule for MissingKeyword {
     }
 }
 
+// --- Rule: compile string minLength/maxLength into pattern ---
+
+pub struct StringCanonicalize;
+
+impl RewriteRule for StringCanonicalize {
+    fn rewrite(
+        &self,
+        prov: &Provenance,
+        node: &JsonF<LocatedValue>,
+    ) -> Result<Option<JsonF<LocatedValue>>, SubtypeError> {
+        let JsonF::Object(pairs) = node else {
+            return Ok(None);
+        };
+        let Some(type_val) = get_entry(pairs, "type") else {
+            return Ok(None);
+        };
+        if type_val.as_str() != Some("string") {
+            return Ok(None);
+        }
+
+        let has_min = has_key(pairs, "minLength");
+        let has_max = has_key(pairs, "maxLength");
+        if !has_min && !has_max {
+            return Ok(None);
+        }
+
+        // When there's already a pattern, we can't merge at the JSON level
+        // (DFA intersection doesn't produce a regex string). Defer to extraction.
+        if has_key(pairs, "pattern") {
+            return Ok(None);
+        }
+
+        let min_val = get_entry(pairs, "minLength")
+            .and_then(|v| v.as_number())
+            .map(|n| n as u64)
+            .unwrap_or(0);
+        let max_val = get_entry(pairs, "maxLength")
+            .and_then(|v| v.as_number())
+            .map(|n| n as u64);
+
+        // minLength: 0 with no maxLength is a no-op — just remove minLength
+        if min_val == 0 && max_val.is_none() {
+            let new_pairs = without_key(pairs, "minLength");
+            return Ok(Some(JsonF::Object(new_pairs)));
+        }
+
+        // Contradictory: minLength > maxLength → unsatisfiable → bottom
+        if let Some(m) = max_val
+            && min_val > m {
+                return Ok(Some(JsonF::Bool(false)));
+            }
+
+        // Build anchored length pattern using [\s\S] (matches any char including newlines,
+        // compatible with ECMA-262 semantics used by JSON Schema's pattern keyword).
+        let length_pattern = match max_val {
+            Some(m) => format!("^[\\s\\S]{{{min_val},{m}}}$"),
+            None => format!("^[\\s\\S]{{{min_val},}}$"),
+        };
+
+        let mut new_pairs = without_keys(pairs, &["minLength", "maxLength"]);
+        new_pairs.push((
+            make_string(prov, "pattern"),
+            make_string(prov, &length_pattern),
+        ));
+        Ok(Some(JsonF::Object(new_pairs)))
+    }
+}
+
 // --- Rule: strip keywords irrelevant to the schema's type ---
 
 pub struct IrrelevantKeywords;
@@ -944,7 +1135,7 @@ impl RewriteRule for IrrelevantKeywords {
             .iter()
             .filter(|(k, _)| {
                 k.as_str()
-                    .map_or(true, |s| relevant.contains(&s) || ANNOTATION_KEYS.contains(&s))
+                    .is_none_or(|s| relevant.contains(&s) || ANNOTATION_KEYS.contains(&s))
             })
             .cloned()
             .collect();
@@ -963,6 +1154,7 @@ pub fn non_type_specific_rules() -> Vec<Box<dyn RewriteRule>> {
         Box::new(UnsupportedKeywords), // must be first: fail-closed
         Box::new(ConstToEnum),
         Box::new(IfThenElse),
+        Box::new(AllTypesIsTop),
         Box::new(MultipleTypes),
         Box::new(MultipleConnectives),
         Box::new(MissingType),
@@ -973,16 +1165,18 @@ pub fn non_type_specific_rules() -> Vec<Box<dyn RewriteRule>> {
 pub fn type_specific_rules() -> Vec<Box<dyn RewriteRule>> {
     vec![
         Box::new(IntegerToNumber),
+        Box::new(IntegerBoundConversion),
         Box::new(HeterogeneousEnum),
         Box::new(OneOfToAnyOf),
         Box::new(AdditionalPropertiesFalse),
         Box::new(ObjectWithProperties),
         Box::new(DependentRequired),
         Box::new(DependentSchemas),
+        Box::new(StringCanonicalize),
         Box::new(IrrelevantKeywords),
         Box::new(MissingKeyword),
-        // String canonicalization and overlapping pattern properties
-        // deferred to after Task 12 (regex algebra).
+        // Overlapping pattern properties deferred (needs regex algebra
+        // to compute non-overlapping regions).
     ]
 }
 
@@ -1183,11 +1377,95 @@ mod tests {
     }
 
     #[test]
+    fn string_min_only_to_pattern() {
+        let input = r#"{"type": "string", "minLength": 3}"#;
+        let tree = parse(input).unwrap();
+        let rules: Vec<Box<dyn RewriteRule>> = vec![Box::new(StringCanonicalize)];
+        let result = rewrite_phase(&tree, &rules).unwrap();
+        assert!(result.get_key("minLength").is_none());
+        let pattern = result.get_key("pattern").unwrap();
+        assert_eq!(pattern.as_str(), Some("^[\\s\\S]{3,}$"));
+    }
+
+    #[test]
+    fn string_min_and_max_to_pattern() {
+        let input = r#"{"type": "string", "minLength": 1, "maxLength": 10}"#;
+        let tree = parse(input).unwrap();
+        let rules: Vec<Box<dyn RewriteRule>> = vec![Box::new(StringCanonicalize)];
+        let result = rewrite_phase(&tree, &rules).unwrap();
+        assert!(result.get_key("minLength").is_none());
+        assert!(result.get_key("maxLength").is_none());
+        let pattern = result.get_key("pattern").unwrap();
+        assert_eq!(pattern.as_str(), Some("^[\\s\\S]{1,10}$"));
+    }
+
+    #[test]
+    fn string_with_pattern_keeps_length() {
+        // When pattern already exists, minLength is kept (deferred to extraction).
+        let input = r#"{"type": "string", "minLength": 3, "pattern": "[a-z]+"}"#;
+        let tree = parse(input).unwrap();
+        let rules: Vec<Box<dyn RewriteRule>> = vec![Box::new(StringCanonicalize)];
+        let result = rewrite_phase(&tree, &rules).unwrap();
+        assert!(result.get_key("minLength").is_some());
+        assert!(result.get_key("pattern").is_some());
+    }
+
+    #[test]
+    fn string_zero_min_no_max_removes_min() {
+        let input = r#"{"type": "string", "minLength": 0}"#;
+        let tree = parse(input).unwrap();
+        let rules: Vec<Box<dyn RewriteRule>> = vec![Box::new(StringCanonicalize)];
+        let result = rewrite_phase(&tree, &rules).unwrap();
+        assert!(result.get_key("minLength").is_none());
+        assert!(result.get_key("pattern").is_none());
+    }
+
+    #[test]
+    fn string_max_only_to_pattern() {
+        let input = r#"{"type": "string", "maxLength": 5}"#;
+        let tree = parse(input).unwrap();
+        let rules: Vec<Box<dyn RewriteRule>> = vec![Box::new(StringCanonicalize)];
+        let result = rewrite_phase(&tree, &rules).unwrap();
+        assert!(result.get_key("maxLength").is_none());
+        let pattern = result.get_key("pattern").unwrap();
+        assert_eq!(pattern.as_str(), Some("^[\\s\\S]{0,5}$"));
+    }
+
+    #[test]
     fn unsupported_keyword_errors() {
         let input = r##"{"$ref": "#/defs/foo"}"##;
         let tree = parse(input).unwrap();
         let rules: Vec<Box<dyn RewriteRule>> = vec![Box::new(UnsupportedKeywords)];
         let result = rewrite_phase(&tree, &rules);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn integer_exclusive_to_inclusive() {
+        let input = r#"{"type": "number", "multipleOf": 1, "exclusiveMaximum": 11}"#;
+        let tree = parse(input).unwrap();
+        let rules: Vec<Box<dyn RewriteRule>> = vec![Box::new(IntegerBoundConversion)];
+        let result = rewrite_phase(&tree, &rules).unwrap();
+        assert_eq!(result.get_key("maximum").unwrap().as_number(), Some(10.0));
+        assert!(result.get_key("exclusiveMaximum").is_none());
+    }
+
+    #[test]
+    fn integer_exclusive_min_to_inclusive() {
+        let input = r#"{"type": "number", "multipleOf": 1, "exclusiveMinimum": 9}"#;
+        let tree = parse(input).unwrap();
+        let rules: Vec<Box<dyn RewriteRule>> = vec![Box::new(IntegerBoundConversion)];
+        let result = rewrite_phase(&tree, &rules).unwrap();
+        assert_eq!(result.get_key("minimum").unwrap().as_number(), Some(10.0));
+        assert!(result.get_key("exclusiveMinimum").is_none());
+    }
+
+    #[test]
+    fn all_types_is_top() {
+        let input = r#"{"type": ["null", "boolean", "object", "array", "number", "string", "integer"]}"#;
+        let tree = parse(input).unwrap();
+        let rules: Vec<Box<dyn RewriteRule>> = vec![Box::new(AllTypesIsTop)];
+        let result = rewrite_phase(&tree, &rules).unwrap();
+        assert!(result.as_object().unwrap().is_empty());
     }
 }

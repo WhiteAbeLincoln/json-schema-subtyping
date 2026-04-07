@@ -1,4 +1,5 @@
 mod boolset;
+pub mod extract;
 mod reduced;
 mod typeset;
 
