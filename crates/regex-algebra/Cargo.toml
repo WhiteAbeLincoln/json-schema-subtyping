@@ -1,0 +1,11 @@
+[package]
+name = "regex-algebra"
+version = "0.1.0"
+edition = "2024"
+description = "Set-algebraic operations on regular languages: intersection, complement, union, subset, and emptiness via DFA product construction"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+regex-automata = { workspace = true }
+regex-syntax = { workspace = true }
+thiserror = { workspace = true }
